@@ -1,0 +1,2360 @@
+if _G.RidePetOverlay_Unload then pcall(_G.RidePetOverlay_Unload) end
+
+local function waitService(name)
+    for _ = 1, 150 do
+        local svc
+        pcall(function() svc = game:GetService(name) end)
+        if not svc then pcall(function() svc = game[name] end) end
+        if not svc then pcall(function() svc = game:FindFirstChild(name) end) end
+        if svc then return svc end
+        pcall(task.wait, 0.1)
+    end
+    return nil
+end
+
+local Workspace = waitService("Workspace")
+local RunService = waitService("RunService")
+local UIS = waitService("UserInputService")
+local Players = waitService("Players")
+
+if not Players or not Workspace then
+    error("Ride a Pet: the game is not ready yet. Wait until you are in the game, then run the script again")
+end
+
+local LP = Players.LocalPlayer
+for _ = 1, 150 do
+    if LP then break end
+    pcall(task.wait, 0.1)
+    LP = Players.LocalPlayer
+end
+if not LP then
+    error("Ride a Pet: your player is not loaded yet. Wait until you are in the game, then run the script again")
+end
+
+local TAB_NAME = "Ride a Pet"
+local PAGES = { "Base", "ESP", "Farm", "Giveaway", "Candy" }
+local P = "pet_rider_"
+
+local K = {}
+K.MAX_NODES = 120
+K.MAX_SCAN = 400
+K.SCAN_RATE = 0.25
+K.POLL_RATE = 0.05
+K.EGG_RETRY = 0.5
+
+K.FARM_LIFT = 4
+K.FARM_POST_PICKUP_DELAY = 0.4
+K.FARM_PICKUP_CHECK_TIME = 1.5
+K.FARM_PICKUP_CHECK_INTERVAL = 0.1
+K.FARM_ARRIVE_RADIUS = 14
+K.FARM_GONE_RADIUS = 20
+K.FARM_PRESS_PULSES = 2
+K.FARM_WATCHDOG_TIME = 20
+
+K.VOLCANO_EGG_CHANCE = 2.5e12
+K.VOLCANO_CHANCE_TOLERANCE = 1e10
+K.VOLCANO_EGG_MATCH = "volcan"
+K.VOLCANO_ROUTE = { "VolcanoEntrance", "VolcanoValidate" }
+K.VOLCANO_LIFT = 0
+K.FARM_VOLCANO_WAIT = 0.6
+K.FARM_BLACKLIST_TIME = 8
+K.FARM_MAX_ATTEMPTS = 4
+K.FARM_BASE_TRIES = 3
+K.FARM_BASE_RADIUS = 15
+K.TWEEN_HOLD = 0.5
+K.DIP_LIFT = 3
+K.VOLCANO_DEFAULTS = {
+    VolcanoEntrance = { -4944.21, 41272.27, -3677.61 },
+    VolcanoValidate = { -4964.61, 41274.82, -3654.23 },
+    VolcanoTop = { -5080.36, 41405.43, -3460.80 },
+}
+K.DIP_PRESSES = 2
+K.DIP_PRESS_GAP = 0.25
+K.DIP_PRESS_DELAY = 0.5
+K.DIP_WAIT = 9.4
+K.GIVE_DEFAULTS = {
+    { 143.61, 40316.19, 892.29 },
+    { 116.51, 40316.19, 923.80 },
+    { 149.96, 40316.19, 946.47 },
+    { 174.54, 40316.19, 913.09 },
+}
+K.GIVE_LIFT = 3
+K.GIVE_IGNORE_RADIUS = 40
+K.GIVE_KEY = 0x47
+K.GIVE_PRESSES = 2
+K.GIVE_ARRIVE_RADIUS = 8
+K.GIVE_VERIFY_WAIT = 0.15
+K.GIVE_PRESS_GAP = 0.25
+K.GIVE_PRESS_DELAY = 0.5
+K.GIVE_PRESS_HOLD = 0.06
+K.GIVE_AFTER = 0.8
+K.WALK_BEFORE = 10
+K.WALK_AFTER = 6
+K.WALK_SPEED = 16
+K.CANDY_DROP = { -45841.43, 40377.78, -20118.09 }
+K.CANDY_LIFT = 3
+K.CANDY_TRIES = 3
+K.CANDY_ARRIVE_RADIUS = 20
+K.CANDY_DROP_RADIUS = 20
+K.CANDY_BLACKLIST_TIME = 10
+
+K.LABEL_OFFSET = Vector3.new(0, 2.8, 0)
+K.INFO_COLOR = Color3.fromRGB(235, 235, 235)
+
+-- Fixed delay AFTER the candy is picked up, keyed by candy number.
+-- Candy_01 = 0s, Candy_02 = 1s, Candy_03 = 3s, Candy_04 = 5s.
+local CANDY_DELAY = { [1] = 0.0, [2] = 1.0, [3] = 3.0, [4] = 5.0 }
+
+local alive = true
+
+--------------------------------------------------------------------
+-- Tiers
+--------------------------------------------------------------------
+
+local tierList = { "Common", "Rare", "Epic", "Legendary", "Mythic", "Divine", "Ethereal" }
+
+local tierRank = {
+    Common = 1, Rare = 2, Epic = 3, Legendary = 4, Mythic = 5, Divine = 6, Ethereal = 7,
+}
+
+local tierColors = {
+    Common = Color3.fromRGB(225, 225, 225),
+    Rare = Color3.fromRGB(80, 170, 255),
+    Epic = Color3.fromRGB(190, 90, 255),
+    Legendary = Color3.fromRGB(255, 195, 55),
+    Mythic = Color3.fromRGB(255, 75, 135),
+    Divine = Color3.fromRGB(90, 255, 205),
+    Ethereal = Color3.fromRGB(255, 255, 120),
+}
+
+local defaultColors = {}
+for tier, color in pairs(tierColors) do
+    defaultColors[tier] = { color.R, color.G, color.B }
+end
+
+local fontNames = { "Proxima Soft Bold", "System Bold", "Fortnite", "Minecraft", "Pixel", "Monospace", "UI" }
+local fontKeys = { "ProximaSoftBold", "SystemBold", "Fortnite", "Minecraft", "Pixel", "Monospace", "UI" }
+
+local function encodeSuffix(value)
+    if value >= 1e12 then return string.format("%.1fT", value / 1e12) end
+    if value >= 1e9 then return string.format("%.1fB", value / 1e9) end
+    if value >= 1e6 then return string.format("%.1fM", value / 1e6) end
+    if value >= 1e3 then return string.format("%.1fK", value / 1e3) end
+    return tostring(math.floor(value))
+end
+
+--------------------------------------------------------------------
+-- Settings
+--------------------------------------------------------------------
+
+local REG = {}
+local cfg = {}
+local widgets = {}
+
+local function reg(id, default, kind)
+    REG[id] = { default = default, kind = kind }
+    cfg[id] = default
+    return id
+end
+
+local ID_MASTER = reg(P .. "master_switch", true, "bool")
+local ID_BEST = reg(P .. "only_best", false, "bool")
+local ID_NAME = reg(P .. "render_id", true, "bool")
+local ID_TIER = reg(P .. "render_tier", true, "bool")
+local ID_CHANCE = reg(P .. "render_chance", true, "bool")
+local ID_DIST = reg(P .. "render_dist", true, "bool")
+local ID_DOT = reg(P .. "render_dot", true, "bool")
+local ID_FONT = reg(P .. "font", 0, "num")
+local ID_SIZE = reg(P .. "text_size", 15, "num")
+local ID_RANGE = reg(P .. "dist_limit", 200000, "num")
+local ID_FARM = reg(P .. "farm_on", false, "bool")
+local ID_HOLD = reg(P .. "hold_time", 2.0, "num")
+local ID_STEP = reg(P .. "step_delay", 0.3, "num")
+local ID_RETURN = reg(P .. "return_wait", 2.0, "num")
+local ID_FOCUS = reg(P .. "require_focus", true, "bool")
+local ID_DIP = reg(P .. "auto_dip", false, "bool")
+local ID_DIPTRIES = reg(P .. "dip_tries", 3, "num")
+local ID_TWEEN_SPEED = reg(P .. "tween_speed", 300, "num")
+local ID_GFARM = reg(P .. "giveaway_farm_on", false, "bool")
+local ID_GDIP = reg(P .. "giveaway_dip", false, "bool")
+local ID_TP = reg(P .. "tp_method", 0, "num")
+local ID_CFARM = reg(P .. "candy_farm_on", false, "bool")
+local ID_CDROPWAIT = reg(P .. "candy_drop_wait", 0.4, "num")
+local CANDY_ID = {}
+for n = 1, 4 do
+    CANDY_ID[n] = reg(P .. "candy_type_" .. n, true, "bool")
+end
+
+local TIER_ID = {}
+local FARM_ID = {}
+local GFARM_ID = {}
+local COL_ID = {}
+for _, tier in ipairs(tierList) do
+    TIER_ID[tier] = reg(P .. "tier_" .. tier, true, "bool")
+    FARM_ID[tier] = reg(P .. "farm_tier_" .. tier, tier == "Divine" or tier == "Ethereal", "bool")
+    GFARM_ID[tier] = reg(P .. "give_tier_" .. tier, tier == "Divine" or tier == "Ethereal", "bool")
+    COL_ID[tier] = P .. "col_" .. tier
+end
+
+local cbCache = {}
+local function cbFor(id)
+    local f = cbCache[id]
+    if f then return f end
+    local meta = REG[id]
+    if meta.kind == "bool" then
+        f = function(v) cfg[id] = (v == true or v == 1) end
+    else
+        local default = meta.default
+        f = function(v) cfg[id] = tonumber(v) or default end
+    end
+    cbCache[id] = f
+    return f
+end
+
+local function setUI(id, value)
+    cfg[id] = value
+    pcall(UI.SetValue, id, value)
+    local w = widgets[id]
+    if w then pcall(function() w:SetValue(value) end) end
+end
+
+local colorVersion = 0
+local colorKeys = {}
+local farmArmed = {}
+local prevOn = { false, false, false }
+
+local function colorKey(c)
+    return string.format("%.3f,%.3f,%.3f", c.R, c.G, c.B)
+end
+
+local function applyColor(tier, color)
+    local key = colorKey(color)
+    if colorKeys[tier] ~= key then
+        colorKeys[tier] = key
+        tierColors[tier] = color
+        colorVersion = colorVersion + 1
+    end
+end
+
+local function readColor(tier)
+    local res = { pcall(UI.GetValue, COL_ID[tier]) }
+    if not res[1] then return end
+    local c = res[2]
+    if c == nil then return end
+    if typeof(c) == "Color3" then
+        applyColor(tier, c)
+        return
+    end
+    local r, g, b = res[2], res[3], res[4]
+    if type(r) == "number" and type(g) == "number" and type(b) == "number" then
+        if r > 1 or g > 1 or b > 1 then
+            r, g, b = r / 255, g / 255, b / 255
+        end
+        applyColor(tier, Color3.new(r, g, b))
+    end
+end
+
+local function pollUI()
+    for id, meta in pairs(REG) do
+        local ok, v = pcall(UI.GetValue, id)
+        if ok and v ~= nil then
+            if meta.kind == "bool" then
+                cfg[id] = (v == true or v == 1)
+            else
+                cfg[id] = tonumber(v) or meta.default
+            end
+            if (id == ID_FARM or id == ID_GFARM or id == ID_CFARM) and not farmArmed[id] then
+                farmArmed[id] = true
+                if cfg[id] then setUI(id, false) end
+            end
+        end
+    end
+
+    local farmIds = { ID_FARM, ID_GFARM, ID_CFARM }
+    local onCount = 0
+    for i = 1, 3 do
+        if cfg[farmIds[i]] == true then onCount = onCount + 1 end
+    end
+    if onCount > 1 then
+        local keep = nil
+        for i = 1, 3 do
+            if cfg[farmIds[i]] == true and not prevOn[i] then
+                keep = farmIds[i]
+                break
+            end
+        end
+        if not keep then keep = ID_FARM end
+        for i = 1, 3 do
+            if farmIds[i] ~= keep and cfg[farmIds[i]] == true then setUI(farmIds[i], false) end
+        end
+    end
+    for i = 1, 3 do
+        prevOn[i] = cfg[farmIds[i]] == true
+    end
+end
+
+--------------------------------------------------------------------
+-- Egg reading
+--------------------------------------------------------------------
+
+local extractNodeData
+do
+local function decodeSuffix(text, strict)
+    if text == nil then return nil end
+    local raw = tostring(text):upper()
+    raw = raw:gsub(",", "")
+    raw = raw:gsub("%s+", "")
+    local baseNum, suffix
+    if strict then
+        baseNum, suffix = raw:match("^X?([%d%.]+)([KMBTQ]?)$")
+    else
+        baseNum, suffix = raw:match("([%d%.]+)([KMBTQ]?)")
+    end
+    local finalNum = tonumber(baseNum)
+    if not finalNum then return nil end
+    local multipliers = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Q = 1e15 }
+    return finalNum * (multipliers[suffix] or 1)
+end
+
+local function resolveTier(chance)
+    if chance >= 1e11 then return "Ethereal" end
+    if chance >= 3e8 then return "Divine" end
+    if chance >= 9e4 then return "Mythic" end
+    if chance >= 1e4 then return "Legendary" end
+    if chance >= 500 then return "Epic" end
+    if chance >= 30 then return "Rare" end
+    return "Common"
+end
+
+local function namedPart(node, name)
+    local child = node:FindFirstChild(name)
+    if child and child:IsA("BasePart") then return child end
+    return nil
+end
+
+local function findEggCore(node)
+    local core = namedPart(node, "Handle") or namedPart(node, "RootPart") or namedPart(node, "EggBase")
+    if core then return core end
+
+    local okPrimary, primary = pcall(function() return node.PrimaryPart end)
+    if okPrimary and primary and primary:IsA("BasePart") then return primary end
+
+    for _, obj in ipairs(node:GetDescendants()) do
+        if obj:IsA("BasePart") then return obj end
+    end
+    return nil
+end
+
+local function isTextObject(obj)
+    return obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")
+end
+
+local function findChanceText(node, core)
+    local ui = core:FindFirstChild("EggLuck") or node:FindFirstChild("EggLuck")
+    local luck = ui and ui:FindFirstChild("Luck")
+    if luck and isTextObject(luck) then return luck, false end
+
+    for _, obj in ipairs(node:GetDescendants()) do
+        if isTextObject(obj) then
+            local okText, text = pcall(function() return obj.Text end)
+            if okText and decodeSuffix(text, true) then return obj, true end
+        end
+    end
+    return nil, false
+end
+
+function extractNodeData(node, addr)
+    local core = findEggCore(node)
+    if not core then return nil end
+
+    local textUI, strict = findChanceText(node, core)
+    if not textUI then return nil end
+
+    local okText, text = pcall(function() return textUI.Text end)
+    if not okText then return nil end
+
+    local chanceVal = decodeSuffix(text, strict)
+    if not chanceVal then return nil end
+
+    return {
+        model = node,
+        core = core,
+        address = addr,
+        identity = node.Name,
+        chance = chanceVal,
+        tier = resolveTier(chanceVal),
+        best = false,
+    }
+end
+end
+
+local eggCache = {}
+local blacklist = {}
+local failCounts = {}
+
+local function getEgg(node)
+    local okAddr, addr = pcall(function() return node.Address end)
+    if not okAddr then addr = nil end
+    local now = tick()
+
+    if addr then
+        local entry = eggCache[addr]
+        if entry then
+            local data = entry.data
+            if data then
+                local valid = false
+                pcall(function()
+                    valid = (data.model == node) and (data.core.Parent ~= nil)
+                end)
+                if valid then return data end
+                eggCache[addr] = nil
+            elseif entry.retryAt > now then
+                return nil
+            end
+        end
+    end
+
+    local okParse, parsed = pcall(extractNodeData, node, addr)
+    if not okParse then parsed = nil end
+
+    if addr then
+        if parsed then
+            eggCache[addr] = { data = parsed }
+        else
+            eggCache[addr] = { retryAt = now + K.EGG_RETRY }
+        end
+    end
+    return parsed
+end
+
+local function cleanEggCache()
+    local now = tick()
+    for addr, entry in pairs(eggCache) do
+        local drop = false
+        if entry.data then
+            local ok, parent = pcall(function() return entry.data.core.Parent end)
+            if not ok or parent == nil then drop = true end
+        elseif entry.retryAt < now - 5 then
+            drop = true
+        end
+        if drop then
+            eggCache[addr] = nil
+            failCounts[addr] = nil
+            blacklist[addr] = nil
+        end
+    end
+end
+
+--------------------------------------------------------------------
+-- Character helpers
+--------------------------------------------------------------------
+
+local function getRoot()
+    local avatar = LP.Character
+    if not avatar then return nil end
+    return avatar:FindFirstChild("HumanoidRootPart") or avatar.PrimaryPart
+end
+
+local function readHealth(model)
+    local hum = model and model:FindFirstChild("Humanoid")
+    if not hum then return nil end
+    local ok, hp = pcall(function() return hum.Health end)
+    if ok then return hp end
+    return nil
+end
+
+local function zeroVelocity(root)
+    root.AssemblyLinearVelocity = Vector3.zero
+end
+
+local TP_NAMES = { "Auto", "Pivot", "CFrame", "Position", "Hold" }
+local usePivot = true
+local tpToken = 0
+
+local function writeCFrame(root, cf)
+    root.CFrame = cf
+    root.AssemblyLinearVelocity = Vector3.zero
+end
+
+local function moveTo(pos, lift, level)
+    local destCF = CFrame.new(pos.X, pos.Y + lift, pos.Z)
+    if level == true then level = 2 end
+    level = level or 1
+
+    local method = math.floor(cfg[ID_TP] or 0)
+    if method == 0 then
+        if level <= 1 then
+            method = 1
+        elseif level == 2 then
+            method = 2
+        else
+            method = 4
+        end
+    end
+
+    tpToken = tpToken + 1
+    local root = getRoot()
+
+    if method == 1 then
+        if usePivot then
+            local avatar = LP.Character
+            if avatar and pcall(function() avatar:PivotTo(destCF) end) then
+                if root then pcall(zeroVelocity, root) end
+                return
+            end
+            usePivot = false
+        end
+        method = 2
+    end
+
+    if not root then return end
+
+    if method == 2 then
+        pcall(writeCFrame, root, destCF)
+    elseif method == 3 then
+        pcall(function() root.Position = Vector3.new(pos.X, pos.Y + lift, pos.Z) end)
+        pcall(zeroVelocity, root)
+    else
+        pcall(writeCFrame, root, destCF)
+        local mine = tpToken
+        task.spawn(function()
+            for _ = 1, 7 do
+                task.wait(0.03)
+                if not alive or tpToken ~= mine then return end
+                pcall(writeCFrame, root, destCF)
+            end
+        end)
+    end
+end
+
+local function jumpToTopTier()
+    local container = Workspace:FindFirstChild("RenderedEggs")
+    if not container then return end
+
+    local primeTarget = nil
+    local maxChance = -1
+
+    for _, obj in ipairs(container:GetChildren()) do
+        if obj.ClassName == "Model" then
+            local parsed = getEgg(obj)
+            if parsed and parsed.chance > maxChance then
+                maxChance = parsed.chance
+                primeTarget = parsed
+            end
+        end
+    end
+
+    if primeTarget then
+        local success, pos = pcall(function() return primeTarget.core.Position end)
+        if success and pos then
+            moveTo(pos, 2.5)
+        end
+    end
+end
+
+local baseCF = nil
+
+local function markBaseHere()
+    local root = getRoot()
+    if not root then return false end
+    local ok, cf = pcall(function() return root.CFrame end)
+    if not ok or not cf then return false end
+    baseCF = cf
+    return true
+end
+
+local function goToBase()
+    if not baseCF then
+        notify("Base not marked yet", TAB_NAME, 3)
+        return
+    end
+    moveTo(baseCF.Position, 3)
+end
+
+local promptKey = 0x45
+
+--------------------------------------------------------------------
+-- Autofarm
+--------------------------------------------------------------------
+
+local farmState = { status = "Off", grabbed = 0, carrying = false, dipDone = false, carryVolcano = false, volcanoOut = false }
+
+local farmGen = 0
+local cycleGen = 0
+
+local function farmOn()
+    return cfg[ID_FARM] == true or cfg[ID_GFARM] == true or cfg[ID_CFARM] == true
+end
+
+local function farmRunning()
+    return alive and farmOn() and cycleGen == farmGen
+end
+
+local function setFarm(on)
+    setUI(ID_FARM, on == true)
+    if on ~= true then
+        setUI(ID_GFARM, false)
+        setUI(ID_CFARM, false)
+    end
+end
+
+local function isEggPickedUp(target)
+    if not target or not target.model then return true end
+
+    local ok, parent = pcall(function() return target.model.Parent end)
+    if not ok or parent == nil then return true end
+
+    local container = Workspace:FindFirstChild("RenderedEggs")
+    if not container then return false end
+
+    local inside = false
+    pcall(function() inside = target.model:IsDescendantOf(container) end)
+    return not inside
+end
+
+local function waitForEggPickup(target, seconds)
+    local limit = seconds or K.FARM_PICKUP_CHECK_TIME
+    local startedAt = tick()
+    while farmRunning() and (tick() - startedAt) < limit do
+        if isEggPickedUp(target) then return true end
+        task.wait(K.FARM_PICKUP_CHECK_INTERVAL)
+    end
+    return isEggPickedUp(target)
+end
+
+local lastTargetAddr = nil
+
+local function eggDistance(target)
+    local ok, d = pcall(function()
+        local corePos = target.core.Position
+        target.lastPos = corePos
+        return (getRoot().Position - corePos).Magnitude
+    end)
+    if ok then return d end
+    return nil
+end
+
+local function goneOutcome(target)
+    local pos = target.lastPos
+    if pos then
+        local ok, d = pcall(function() return (getRoot().Position - pos).Magnitude end)
+        if ok and d <= K.FARM_GONE_RADIUS then return "picked" end
+    end
+    return "gone"
+end
+
+--------------------------------------------------------------------
+-- Giveaway
+--------------------------------------------------------------------
+
+local give = { points = {}, nextIndex = 1, given = 0 }
+
+function give.count()
+    local n = 0
+    for i = 1, 4 do if give.points[i] then n = n + 1 end end
+    return n
+end
+
+function give.active()
+    return cfg[ID_GFARM] == true and give.count() > 0
+end
+
+function give.load()
+    for i, c in ipairs(K.GIVE_DEFAULTS) do
+        if i <= 4 then give.points[i] = Vector3.new(c[1], c[2], c[3]) end
+    end
+end
+
+function give.isGiven(parsed)
+    if not give.active() then return false end
+    local ok, pos = pcall(function() return parsed.core.Position end)
+    if not ok or not pos then return false end
+    for i = 1, 4 do
+        local v = give.points[i]
+        if v and (pos - v).Magnitude <= K.GIVE_IGNORE_RADIUS then return true end
+    end
+    return false
+end
+
+function give.pick()
+    for step = 0, 3 do
+        local i = ((give.nextIndex - 1 + step) % 4) + 1
+        if give.points[i] then return i, give.points[i] end
+    end
+end
+
+give.load()
+
+local function isBetter(a, b, playerPos)
+    if a.chance ~= b.chance then return a.chance > b.chance end
+
+    local aSticky = a.address ~= nil and a.address == lastTargetAddr
+    local bSticky = b.address ~= nil and b.address == lastTargetAddr
+    if aSticky ~= bSticky then return aSticky end
+
+    if playerPos then
+        local okA, da = pcall(function() return (a.core.Position - playerPos).Magnitude end)
+        local okB, db = pcall(function() return (b.core.Position - playerPos).Magnitude end)
+        if okA and okB and da ~= db then return da < db end
+    end
+    return (a.address or 0) < (b.address or 0)
+end
+
+local function pickFarmTarget()
+    local info = { found = 0, unread = 0, matched = 0, blocked = 0 }
+    local container = Workspace:FindFirstChild("RenderedEggs")
+    if not container then return nil, info end
+
+    local playerPos = nil
+    local root = getRoot()
+    if root then
+        local okPos, p = pcall(function() return root.Position end)
+        if okPos then playerPos = p end
+    end
+
+    local now = tick()
+    local best = nil
+    for _, obj in ipairs(container:GetChildren()) do
+        if obj.ClassName == "Model" then
+            info.found = info.found + 1
+            local parsed = getEgg(obj)
+            if not parsed then
+                info.unread = info.unread + 1
+            elseif cfg[(cfg[ID_GFARM] == true and GFARM_ID or FARM_ID)[parsed.tier]] == true then
+                info.matched = info.matched + 1
+                local blockedUntil = parsed.address and blacklist[parsed.address]
+                if blockedUntil and blockedUntil > now then
+                    info.blocked = info.blocked + 1
+                elseif give.isGiven(parsed) then
+                    info.blocked = info.blocked + 1
+                elseif not best or isBetter(parsed, best, playerPos) then
+                    best = parsed
+                end
+            end
+        end
+    end
+    return best, info
+end
+
+local function hopTo(getPos, lift, forceRoot, radius)
+    for i = 1, 3 do
+        if not farmRunning() then return false end
+        local ok, pos = pcall(getPos)
+        if not ok or not pos then return false end
+
+        local level = i
+        if forceRoot and level < 2 then level = 2 end
+        moveTo(pos, lift, level)
+        task.wait(0.05)
+
+        local okRoot, rootPos = pcall(function() return getRoot().Position end)
+        if okRoot and rootPos and (rootPos - pos).Magnitude <= radius then
+            return true
+        end
+        task.wait(0.05)
+    end
+    return false
+end
+
+local function settle(seconds)
+    local untilTime = tick() + seconds
+    while farmRunning() and tick() < untilTime do
+        local r = getRoot()
+        if r then pcall(zeroVelocity, r) end
+        task.wait(0.05)
+    end
+end
+
+local function teleportToEgg(target, forceRoot)
+    return hopTo(function()
+        local pos = target.core.Position
+        target.lastPos = pos
+        return pos
+    end, K.FARM_LIFT, forceRoot, K.FARM_ARRIVE_RADIUS)
+end
+
+--------------------------------------------------------------------
+-- Volcanic egg
+--------------------------------------------------------------------
+
+local lastVolcanoNotify = {}
+
+local function notifyOnce(key, message)
+    if tick() - (lastVolcanoNotify[key] or 0) > 10 then
+        lastVolcanoNotify[key] = tick()
+        notify(message, TAB_NAME, 4)
+    end
+end
+
+local function isVolcanoEgg(target)
+    if math.abs(target.chance - K.VOLCANO_EGG_CHANCE) <= K.VOLCANO_CHANCE_TOLERANCE then
+        return true
+    end
+    local name = string.lower(tostring(target.identity))
+    return string.find(name, K.VOLCANO_EGG_MATCH, 1, true) ~= nil
+end
+
+local volcanoPos = {}
+for name, c in pairs(K.VOLCANO_DEFAULTS) do
+    volcanoPos[name] = Vector3.new(c[1], c[2], c[3])
+end
+
+local function visitVolcanoPoint(name, lift, forceRoot)
+    local where = volcanoPos[name]
+    if not where then return "missing" end
+    farmState.status = "Volcano: " .. name
+    return hopTo(function() return where end, lift, forceRoot, K.FARM_ARRIVE_RADIUS)
+end
+
+local function walkThrough(name, forceRoot, reverse)
+    local point = volcanoPos[name]
+    if not point then return "missing" end
+
+    local entrance = volcanoPos.VolcanoEntrance
+    local inside = volcanoPos.VolcanoValidate
+    local dx, dz = 0, 1
+    if entrance and inside then dx, dz = inside.X - entrance.X, inside.Z - entrance.Z end
+    local len = math.sqrt(dx * dx + dz * dz)
+    if len < 0.1 then dx, dz, len = 0, 1, 1 end
+    local ux, uz = dx / len, dz / len
+    if reverse then ux, uz = -ux, -uz end
+
+    local startPos = Vector3.new(point.X - ux * K.WALK_BEFORE, point.Y, point.Z - uz * K.WALK_BEFORE)
+    local endPos = Vector3.new(point.X + ux * K.WALK_AFTER, point.Y, point.Z + uz * K.WALK_AFTER)
+
+    farmState.status = "Volcano: " .. name .. (reverse and " (walking out)" or " (walking in)")
+    if not hopTo(function() return startPos end, 0, forceRoot, K.FARM_ARRIVE_RADIUS) then return false end
+    settle(0.3)
+
+    local duration = (K.WALK_BEFORE + K.WALK_AFTER) / K.WALK_SPEED
+    local startedAt = tick()
+    while farmRunning() do
+        local t = (tick() - startedAt) / duration
+        if t > 1 then t = 1 end
+        local root = getRoot()
+        if root then
+            pcall(function()
+                root.CFrame = CFrame.new(
+                    startPos.X + (endPos.X - startPos.X) * t,
+                    startPos.Y + (endPos.Y - startPos.Y) * t,
+                    startPos.Z + (endPos.Z - startPos.Z) * t
+                )
+                root.AssemblyLinearVelocity = Vector3.new(ux * K.WALK_SPEED, 0, uz * K.WALK_SPEED)
+            end)
+        end
+        if t >= 1 then break end
+        task.wait()
+    end
+    return farmRunning()
+end
+
+local function exitVolcano(forceRoot)
+    for i = #K.VOLCANO_ROUTE, 1, -1 do
+        local partName = K.VOLCANO_ROUTE[i]
+        if partName == "VolcanoEntrance" or partName == "VolcanoValidate" then
+            if not farmRunning() then return false end
+            local result = walkThrough(partName, forceRoot, true)
+            if result == "missing" then
+                notifyOnce(partName, partName .. " has no coordinates in the script. Skipping it")
+            elseif result then
+                settle(K.FARM_VOLCANO_WAIT)
+            else
+                return false
+            end
+        end
+    end
+    return true
+end
+
+local function runVolcanoRoute(forceRoot)
+    for _, partName in ipairs(K.VOLCANO_ROUTE) do
+        if not farmRunning() then return false end
+        local result
+        if partName == "VolcanoEntrance" or partName == "VolcanoValidate" then
+            result = walkThrough(partName, forceRoot)
+        else
+            result = visitVolcanoPoint(partName, K.VOLCANO_LIFT, forceRoot)
+        end
+        if result == "missing" then
+            notifyOnce(partName, partName .. " has no coordinates in the script. Skipping it")
+        elseif result then
+            settle(K.FARM_VOLCANO_WAIT)
+        else
+            return false
+        end
+    end
+    return true
+end
+
+local returnToBase
+do
+local tweenParts = {}
+local tweenNoclipAt = 0
+
+local function listTweenParts()
+    tweenParts = {}
+    pcall(function()
+        local avatar = LP.Character
+        if not avatar then return end
+        for _, part in ipairs(avatar:GetDescendants()) do
+            if part:IsA("BasePart") then tweenParts[#tweenParts + 1] = part end
+        end
+    end)
+    tweenNoclipAt = 0
+end
+
+local function tweenNoclip()
+    local now = tick()
+    if now - tweenNoclipAt < 0.25 then return end
+    tweenNoclipAt = now
+    for i = 1, #tweenParts do
+        pcall(function() tweenParts[i].CanCollide = false end)
+    end
+end
+
+local function tweenPlace(root, x, y, z, vx, vy, vz)
+    return pcall(function()
+        root.Position = Vector3.new(x, y, z)
+        root.AssemblyLinearVelocity = Vector3.new(vx or 0, vy or 0, vz or 0)
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+local function tweenSegment(from, to, speed)
+    local dx, dy, dz = to.X - from.X, to.Y - from.Y, to.Z - from.Z
+    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if dist < 1 then return true end
+    local duration = dist / speed
+    local vx, vy, vz = dx / duration, dy / duration, dz / duration
+
+    local root = getRoot()
+    if not root then return false end
+    local t0 = tick()
+    while true do
+        task.wait()
+        if not farmRunning() then return false end
+        local t = (tick() - t0) / duration
+        if t >= 1 then break end
+        local ok = tweenPlace(root, from.X + dx * t, from.Y + dy * t, from.Z + dz * t, vx, vy, vz)
+        if not ok then
+            root = getRoot()
+            if not root then return false end
+        end
+        tweenNoclip()
+        farmState.status = string.format("Returning to base (%d studs left)", math.floor(dist * (1 - t)))
+    end
+    tweenPlace(root, to.X, to.Y, to.Z)
+    return true
+end
+
+local function tweenToBase(basePos)
+    local root = getRoot()
+    if not root then return false end
+
+    local speed = tonumber(cfg[ID_TWEEN_SPEED]) or 300
+    if speed < 10 then speed = 10 end
+
+    listTweenParts()
+    pcall(function() root.Anchored = true end)
+
+    local ok = tweenSegment(root.Position, basePos, speed)
+
+    if ok then
+        local holdUntil = tick() + K.TWEEN_HOLD
+        while tick() < holdUntil do
+            root = getRoot()
+            if not root or not farmRunning() then ok = false break end
+            tweenPlace(root, basePos.X, basePos.Y, basePos.Z)
+            tweenNoclip()
+            task.wait()
+        end
+    end
+
+    root = getRoot()
+    if root then
+        pcall(function() root.Anchored = false end)
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+    return ok
+end
+
+function returnToBase()
+    if not baseCF then return false end
+    local basePos = baseCF.Position
+    local round = 0
+    while farmRunning() do
+        round = round + 1
+        if not tweenToBase(basePos) then
+            if not farmRunning() then return false end
+        end
+        local ok, d = pcall(function() return (getRoot().Position - basePos).Magnitude end)
+        if ok and d <= K.FARM_BASE_RADIUS then return true end
+        if round == 1 then
+            notifyOnce("BaseRetry", "Could not reach base yet. Still trying")
+        end
+        settle(0.5)
+    end
+    return false
+end
+end
+
+local function tapDropKey()
+    pcall(keyrelease, K.GIVE_KEY)
+    task.wait(0.02)
+    local ok = pcall(keypress, K.GIVE_KEY)
+    task.wait(K.GIVE_PRESS_HOLD)
+    pcall(keyrelease, K.GIVE_KEY)
+    return ok
+end
+
+local function settleWithStatus(seconds, label)
+    local untilTime = tick() + seconds
+    while farmRunning() do
+        local left = untilTime - tick()
+        if left <= 0 then break end
+        farmState.status = string.format("%s %.1fs", label, left)
+        local r = getRoot()
+        if r then pcall(zeroVelocity, r) end
+        task.wait(0.05)
+    end
+end
+
+local function dropEgg()
+    settle(0.3)
+    settle(K.DIP_PRESS_DELAY)
+    pcall(setrobloxinput, true)
+    for i = 1, K.DIP_PRESSES do
+        if not farmRunning() then return end
+        farmState.status = string.format("Dip: press G %d of %d", i, K.DIP_PRESSES)
+        tapDropKey()
+        settle(K.DIP_PRESS_GAP)
+    end
+    settleWithStatus(K.DIP_WAIT, "Dip: waiting")
+end
+
+local function runAutoDip()
+    farmState.dipDone = true
+    local tries = math.floor((tonumber(cfg[ID_DIPTRIES]) or 3) + 0.5)
+    if tries < 1 then tries = 1 end
+
+    for attempt = 1, tries do
+        if not farmRunning() then return end
+        farmState.status = string.format("Dip: going to VolcanoTop (try %d of %d)", attempt, tries)
+        local result = visitVolcanoPoint("VolcanoTop", K.DIP_LIFT, attempt > 1)
+        if result == "missing" then
+            notifyOnce("VolcanoTop", "VolcanoTop has no coordinates in the script. Skipping Auto Dip")
+            return
+        elseif result then
+            dropEgg()
+            return
+        end
+        if attempt < tries then
+            notify(string.format("Could not reach VolcanoTop. Retrying (try %d of %d)", attempt + 1, tries), TAB_NAME, 3)
+            settle(1.0)
+        end
+    end
+    notifyOnce("VolcanoTopFail", "Could not reach VolcanoTop after " .. tries .. " tries. Going to base")
+end
+
+local function giveDist(where)
+    local ok, d = pcall(function() return (getRoot().Position - where).Magnitude end)
+    if ok then return d end
+end
+
+local function goToExact(where, idx)
+    local attempt = 0
+    while farmRunning() do
+        attempt = attempt + 1
+        farmState.status = string.format("Giveaway: going to point %d (try %d)", idx, attempt)
+        local level = attempt
+        if level > 3 then level = 3 end
+        moveTo(where, K.GIVE_LIFT, level)
+        settle(K.GIVE_VERIFY_WAIT)
+
+        local d = giveDist(where)
+        if d and d <= K.GIVE_ARRIVE_RADIUS then
+            settle(K.GIVE_VERIFY_WAIT)
+            d = giveDist(where)
+            if d and d <= K.GIVE_ARRIVE_RADIUS then return true end
+        end
+        if attempt == 6 then
+            notifyOnce("GiveRetry", "Could not reach the drop point yet. Still trying")
+        end
+        if attempt % 3 == 0 then settle(0.4) end
+    end
+    return false
+end
+
+local function giveEgg()
+    local idx, where = give.pick()
+    if not idx then return false end
+    if not goToExact(where, idx) then return false end
+
+    settle(0.3)
+    settle(K.GIVE_PRESS_DELAY)
+    pcall(setrobloxinput, true)
+    local i = 1
+    while i <= K.GIVE_PRESSES do
+        if not farmRunning() then return false end
+        local d = giveDist(where)
+        if not d or d > K.GIVE_ARRIVE_RADIUS then
+            if not goToExact(where, idx) then return false end
+            settle(0.2)
+        end
+        farmState.status = string.format("Giveaway: dropping at point %d (press G %d of %d)", idx, i, K.GIVE_PRESSES)
+        tapDropKey()
+        settle(K.GIVE_PRESS_GAP)
+        i = i + 1
+    end
+    settle(K.GIVE_AFTER)
+    give.nextIndex = (idx % 4) + 1
+    give.given = give.given + 1
+    farmState.carrying = false
+    return true
+end
+
+local function leaveVolcanoIfNeeded()
+    if not farmState.carryVolcano or farmState.volcanoOut then return end
+    for attempt = 1, 3 do
+        if not farmRunning() then return end
+        if exitVolcano(attempt > 1) then
+            farmState.volcanoOut = true
+            return
+        end
+    end
+    farmState.volcanoOut = true
+    notifyOnce("VolcanoExitFail", "Could not walk out of the volcano. Carrying on anyway")
+end
+
+local function deliverEgg()
+    leaveVolcanoIfNeeded()
+    if not farmRunning() then return false end
+    if give.active() then
+        if cfg[ID_GDIP] == true and not farmState.dipDone then
+            runAutoDip()
+        end
+        if not farmRunning() then return false end
+        return giveEgg()
+    end
+    if cfg[ID_DIP] == true and not farmState.dipDone then
+        runAutoDip()
+    end
+    if not farmRunning() then return false end
+    if returnToBase() then
+        farmState.carrying = false
+        return true
+    end
+    return false
+end
+
+local function findPrompt(target)
+    if target.prompt == nil then
+        target.prompt = false
+        pcall(function()
+            for _, d in ipairs(target.model:GetDescendants()) do
+                if d.ClassName == "ProximityPrompt" then
+                    target.prompt = d
+                    break
+                end
+            end
+        end)
+    end
+    return target.prompt or nil
+end
+
+local function holdSecondsFor(target)
+    local seconds = cfg[ID_HOLD]
+    local prompt = findPrompt(target)
+    if prompt then
+        local ok, duration = pcall(function() return prompt.HoldDuration end)
+        if ok and type(duration) == "number" and duration + 0.35 > seconds then
+            seconds = duration + 0.35
+        end
+    end
+    return seconds
+end
+
+local function waitPromptEnabled(target)
+    local prompt = findPrompt(target)
+    if not prompt then return end
+    local waited = 0
+    while waited < 1 and farmRunning() do
+        local ok, enabled = pcall(function() return prompt.Enabled end)
+        if not ok or enabled ~= false then return end
+        task.wait(0.1)
+        waited = waited + 0.1
+    end
+end
+
+local function pressPrompt()
+    pcall(setrobloxinput, true)
+    pcall(keyrelease, promptKey)
+    task.wait(0.03)
+    for _ = 1, 3 do
+        if not pcall(keypress, promptKey) then return false end
+        task.wait(0.04)
+        local ok, held = pcall(iskeypressed, promptKey)
+        if not ok or held ~= false then return true end
+        pcall(keyrelease, promptKey)
+        task.wait(0.03)
+    end
+    pcall(keypress, promptKey)
+    return true
+end
+
+local function holdForEgg(target)
+    if isEggPickedUp(target) then return goneOutcome(target) end
+
+    waitPromptEnabled(target)
+    local holdTime = holdSecondsFor(target)
+
+    for pulse = 1, K.FARM_PRESS_PULSES do
+        if not farmRunning() then break end
+
+        if not pressPrompt() then
+            notify("keypress is not available. Autofarm stopped", TAB_NAME, 4)
+            setFarm(false)
+            return "failed"
+        end
+
+        local elapsed = 0
+        local sinceCheck = 0
+        local picked = false
+        while elapsed < holdTime and farmRunning() do
+            if isEggPickedUp(target) then
+                picked = true
+                break
+            end
+            task.wait(0.05)
+            elapsed = elapsed + 0.05
+            sinceCheck = sinceCheck + 0.05
+
+            local root = getRoot()
+            if root then pcall(zeroVelocity, root) end
+            if sinceCheck >= 0.25 then
+                sinceCheck = 0
+                local d = eggDistance(target)
+                if d and d > 10 then
+                    local okPos, pos = pcall(function() return target.core.Position end)
+                    if okPos and pos then moveTo(pos, K.FARM_LIFT, true) end
+                end
+            end
+        end
+        pcall(keyrelease, promptKey)
+
+        if picked then return "picked" end
+
+        local lastPulse = pulse == K.FARM_PRESS_PULSES
+        if waitForEggPickup(target, lastPulse and K.FARM_PICKUP_CHECK_TIME or 0.5) then
+            return "picked"
+        end
+
+        if not lastPulse then
+            local d = eggDistance(target)
+            if not d or d > 6 then
+                local okPos, pos = pcall(function() return target.core.Position end)
+                if okPos and pos then moveTo(pos, K.FARM_LIFT, true) end
+            end
+            task.wait(0.1)
+        end
+    end
+
+    if isEggPickedUp(target) then return "picked" end
+    return "failed"
+end
+
+local function waitWithStatus(seconds, label)
+    local untilTime = tick() + seconds
+    while farmRunning() do
+        local left = untilTime - tick()
+        if left <= 0 then break end
+        farmState.status = string.format("%s %.1fs", label, left)
+        task.wait(0.1)
+    end
+end
+
+local function finishDelivery()
+    local giving = give.active()
+    if deliverEgg() then
+        if not giving then waitWithStatus(cfg[ID_RETURN], "Waiting at base") end
+    end
+end
+
+--------------------------------------------------------------------
+-- Candy farm
+--------------------------------------------------------------------
+
+local candy = { delivered = 0, blacklist = {} }
+local candyDrop = Vector3.new(K.CANDY_DROP[1], K.CANDY_DROP[2], K.CANDY_DROP[3])
+local candyCycle
+do
+
+local function candyCollect(node, num, depth, out)
+    for _, c in ipairs(node:GetChildren()) do
+        local n = tonumber(string.match(c.Name, "^Candy_(%d+)$"))
+        local cls = c.ClassName
+        if n then
+            if cls == "Folder" then
+                candyCollect(c, n, depth + 1, out)
+            else
+                table.insert(out, { inst = c, num = n })
+            end
+        elseif num and (cls == "Model" or c:IsA("BasePart")) then
+            table.insert(out, { inst = c, num = num })
+        elseif depth < 3 and cls == "Folder" then
+            candyCollect(c, nil, depth + 1, out)
+        end
+    end
+end
+
+local function candyPart(inst)
+    if inst:IsA("BasePart") then return inst end
+    local ok, prim = pcall(function() return inst.PrimaryPart end)
+    if ok and prim then return prim end
+    for _, d in ipairs(inst:GetDescendants()) do
+        if d:IsA("BasePart") then return d end
+    end
+    return nil
+end
+
+local function candyPrompt(inst)
+    if inst.ClassName == "ProximityPrompt" then return inst end
+    for _, d in ipairs(inst:GetDescendants()) do
+        if d.ClassName == "ProximityPrompt" then return d end
+    end
+    return nil
+end
+
+local function pickCandy()
+    local container = Workspace:FindFirstChild("HalloweenCandy")
+    if not container then return nil, "No HalloweenCandy folder" end
+
+    local list = {}
+    candyCollect(container, nil, 0, list)
+
+    local rootPos = nil
+    local root = getRoot()
+    if root then
+        local okPos, p = pcall(function() return root.Position end)
+        if okPos then rootPos = p end
+    end
+
+    local now = tick()
+    local best, bestNum, bestDist = nil, -1, math.huge
+    local total, allowed = 0, 0
+
+    for _, item in ipairs(list) do
+        total = total + 1
+        local typeOn = true
+        if CANDY_ID[item.num] then typeOn = cfg[CANDY_ID[item.num]] ~= false end
+        if typeOn then
+            allowed = allowed + 1
+            local okAddr, addr = pcall(function() return item.inst.Address end)
+            if not okAddr then addr = nil end
+            local blocked = addr and candy.blacklist[addr] and candy.blacklist[addr] > now
+            if not blocked then
+                local part = candyPart(item.inst)
+                local okPos, pos = false, nil
+                if part then okPos, pos = pcall(function() return part.Position end) end
+                if okPos and pos then
+                    local d = rootPos and (pos - rootPos).Magnitude or 0
+                    if item.num > bestNum or (item.num == bestNum and d < bestDist) then
+                        bestNum = item.num
+                        bestDist = d
+                        best = { inst = item.inst, part = part, num = item.num, addr = addr, prompt = candyPrompt(item.inst) }
+                    end
+                end
+            end
+        end
+    end
+
+    if not best then
+        return nil, string.format("Waiting: %d candy, %d allowed", total, allowed), container
+    end
+    return best, nil, container
+end
+
+local function candyGone(t, container)
+    local ok, parent = pcall(function() return t.inst.Parent end)
+    if not ok or parent == nil then return true end
+    local inside = false
+    pcall(function() inside = t.inst:IsDescendantOf(container) end)
+    if not inside then return true end
+    return false
+end
+
+local function candyNear(pos, radius)
+    local ok, d = pcall(function() return (getRoot().Position - pos).Magnitude end)
+    return ok and d <= radius
+end
+
+-- Press E and hold long enough for the game's ProximityPrompt to register,
+-- confirm the candy actually disappeared, THEN run the fixed per-candy
+-- delay. If the press didn't take, retry instead of starting the timer.
+local function grabCandy(t, container)
+    -- How long to hold E for this press. Prefer the prompt's own HoldDuration.
+    local holdTime = 0.5
+    if t.prompt then
+        local ok, d = pcall(function() return t.prompt.HoldDuration end)
+        if ok and type(d) == "number" and d + 0.15 > holdTime then
+            holdTime = d + 0.15
+        end
+    end
+
+    local picked = false
+    for press = 1, 3 do
+        if not farmRunning() then break end
+
+        pcall(keyrelease, promptKey)
+        task.wait(0.03)
+        if not pcall(keypress, promptKey) then return "nokey" end
+
+        -- Hold E for the required duration, checking for pickup as we go
+        local held = 0
+        while held < holdTime and farmRunning() do
+            if candyGone(t, container) then
+                picked = true
+                break
+            end
+            task.wait(0.05)
+            held = held + 0.05
+        end
+        pcall(keyrelease, promptKey)
+
+        if picked then break end
+
+        -- Give the game a short grace window to register the pickup
+        local graceEnd = tick() + 0.3
+        while tick() < graceEnd and farmRunning() do
+            if candyGone(t, container) then
+                picked = true
+                break
+            end
+            task.wait(0.05)
+        end
+
+        if picked then break end
+
+        -- Missed it. Re-teleport onto the candy and try again.
+        local okPos, candyPos = pcall(function() return t.part.Position end)
+        if okPos and candyPos then
+            moveTo(candyPos, K.CANDY_LIFT, 2)
+            task.wait(0.1)
+        end
+    end
+
+    if not picked then
+        farmState.status = string.format("Candy_%02d: press did not register", t.num)
+        return false
+    end
+
+    -- NOW start the fixed post-pickup delay for this candy number.
+    local waitAfter = CANDY_DELAY[t.num] or 0
+    if waitAfter < 0 then waitAfter = 0 end
+
+    local startWait = tick()
+    while farmRunning() do
+        local elapsed = tick() - startWait
+        if elapsed >= waitAfter then break end
+        farmState.status = string.format("Candy_%02d: waiting %.1fs after pickup", t.num, waitAfter - elapsed)
+        local r = getRoot()
+        if r then pcall(zeroVelocity, r) end
+        task.wait(0.05)
+    end
+
+    return true
+end
+
+function candyCycle()
+    local target, message, container = pickCandy()
+    if not target then
+        farmState.status = message or "Waiting for candy"
+        task.wait(0.2)
+        return
+    end
+
+    local result = false
+    for attempt = 1, K.CANDY_TRIES do
+        if not farmRunning() then return end
+        farmState.status = string.format("Candy_%02d: grabbing (try %d)", target.num, attempt)
+
+        if candyGone(target, container) then
+            result = "gone"
+            break
+        end
+
+        -- Teleport directly to the candy with a single moveTo, no hopTo
+        -- verification loop, so there is zero delay before the E press.
+        local okPos, candyPos = pcall(function() return target.part.Position end)
+        if okPos and candyPos then
+            moveTo(candyPos, K.CANDY_LIFT, attempt > 1 and 2 or 1)
+            task.wait(0.1)
+        end
+
+        if not candyGone(target, container) then
+            local r = grabCandy(target, container)
+            if r == "nokey" then
+                notify("keypress is not available. Autofarm stopped", TAB_NAME, 4)
+                setFarm(false)
+                return
+            end
+            if r then
+                result = true
+                break
+            end
+        else
+            result = "gone"
+            break
+        end
+    end
+
+    if result == true then
+        candy.delivered = candy.delivered + 1
+        farmState.status = "Candy: delivering"
+        hopTo(function() return candyDrop end, K.CANDY_LIFT, false, K.CANDY_DROP_RADIUS)
+        settle(cfg[ID_CDROPWAIT])
+    elseif result ~= "gone" and target.addr then
+        candy.blacklist[target.addr] = tick() + K.CANDY_BLACKLIST_TIME
+        farmState.status = "Skipped a candy"
+    end
+end
+
+end
+
+local lastFocusNotify = 0
+
+local function farmCycle()
+    if cfg[ID_CFARM] ~= true and not baseCF then
+        notify("Mark a base first. Autofarm stopped", TAB_NAME, 4)
+        setFarm(false)
+        return
+    end
+
+    local hp = readHealth(LP.Character)
+    if not getRoot() or (hp ~= nil and hp <= 0) then
+        farmState.carrying = false
+        farmState.status = "Waiting for character"
+        task.wait(0.3)
+        return
+    end
+
+    if cfg[ID_FOCUS] == true then
+        local okActive, active = pcall(isrbxactive)
+        if okActive and active == false then
+            farmState.status = "Paused: focus the Roblox window"
+            if tick() - lastFocusNotify > 10 then
+                lastFocusNotify = tick()
+                notify("Autofarm paused. Focus the Roblox window", TAB_NAME, 3)
+            end
+            task.wait(0.2)
+            return
+        end
+    end
+
+    if cfg[ID_CFARM] == true then
+        candyCycle()
+        return
+    end
+
+    if farmState.carrying then
+        finishDelivery()
+        return
+    end
+
+    local target, info = pickFarmTarget()
+    if not target then
+        if info.found == 0 then
+            farmState.status = "No eggs rendered"
+        else
+            farmState.status = string.format(
+                "Waiting: %d eggs, %d match, %d skipped",
+                info.found, info.matched, info.blocked
+            )
+        end
+        task.wait(0.15)
+        return
+    end
+
+    lastTargetAddr = target.address
+
+    local outcome = "failed"
+    for attempt = 1, K.FARM_MAX_ATTEMPTS do
+        if not farmRunning() then return end
+        farmState.status = string.format("Grabbing %s %s (try %d)", target.tier, encodeSuffix(target.chance), attempt)
+
+        if isEggPickedUp(target) then
+            outcome = goneOutcome(target)
+            break
+        end
+
+        local force = attempt > 1
+
+        local routeOk = true
+        if isVolcanoEgg(target) then
+            routeOk = runVolcanoRoute(force)
+            farmState.status = string.format("Grabbing %s %s (try %d)", target.tier, encodeSuffix(target.chance), attempt)
+        end
+
+        if routeOk and teleportToEgg(target, force) then
+            settle(cfg[ID_STEP])
+            if isEggPickedUp(target) then
+                outcome = goneOutcome(target)
+                break
+            end
+
+            local d = eggDistance(target)
+            if not d or d > 6 then
+                teleportToEgg(target, force)
+            end
+            settle(cfg[ID_STEP])
+
+            local result = holdForEgg(target)
+            if result == "picked" then
+                outcome = "picked"
+                break
+            end
+            if result == "gone" then
+                outcome = "gone"
+                break
+            end
+        else
+            task.wait(0.1)
+        end
+    end
+
+    if outcome == "picked" then
+        farmState.grabbed = farmState.grabbed + 1
+        farmState.carrying = true
+        farmState.carryVolcano = isVolcanoEgg(target)
+        farmState.volcanoOut = false
+        farmState.dipDone = false
+        task.wait(K.FARM_POST_PICKUP_DELAY)
+        if farmRunning() then finishDelivery() end
+    elseif outcome == "gone" then
+        farmState.status = "Egg taken. Rescanning"
+    else
+        if target.address then
+            local fails = (failCounts[target.address] or 0) + 1
+            failCounts[target.address] = fails
+            blacklist[target.address] = tick() + math.min(K.FARM_BLACKLIST_TIME * fails, 45)
+        end
+        farmState.status = string.format("Skipped an egg after %d tries", K.FARM_MAX_ATTEMPTS)
+    end
+end
+
+--------------------------------------------------------------------
+-- Drawing
+--------------------------------------------------------------------
+
+local labelCache = {}
+local appliedFont = -1
+local appliedSize = -1
+
+local function resolveFont(index)
+    local key = fontKeys[index] or fontKeys[1]
+    local fonts = Drawing.Fonts
+    local font = fonts and fonts[key]
+    if font == nil then font = 2 end
+    return font
+end
+
+local function makeText(size)
+    local t = Drawing.new("Text")
+    t.Size = size
+    pcall(function() t.FontSize = size end)
+    t.Center = true
+    t.Outline = true
+    t.Visible = false
+    return t
+end
+
+for i = 1, K.MAX_NODES do
+    local dot = Drawing.new("Circle")
+    dot.Radius = 3
+    dot.NumSides = 16
+    dot.Thickness = 1
+    pcall(function() dot.Filled = true end)
+    dot.Visible = false
+
+    local info = makeText(13)
+    info.Color = K.INFO_COLOR
+
+    labelCache[i] = {
+        name = makeText(15),
+        info = info,
+        dot = dot,
+        nv = false,
+        iv = false,
+        dv = false,
+    }
+end
+
+local function applyStyle(fontIndex, size)
+    local font = resolveFont(fontIndex)
+    local infoSize = math.max(size - 2, 8)
+    for i = 1, K.MAX_NODES do
+        local slot = labelCache[i]
+        pcall(function() slot.name.Font = font end)
+        pcall(function() slot.info.Font = font end)
+        pcall(function()
+            slot.name.Size = size
+            slot.name.FontSize = size
+        end)
+        pcall(function()
+            slot.info.Size = infoSize
+            slot.info.FontSize = infoSize
+        end)
+    end
+    appliedFont = fontIndex
+    appliedSize = size
+end
+
+local function setVis(obj, slot, field, value)
+    if slot[field] ~= value then
+        slot[field] = value
+        obj.Visible = value
+    end
+end
+
+local function hideSlot(slot)
+    setVis(slot.name, slot, "nv", false)
+    setVis(slot.info, slot, "iv", false)
+    setVis(slot.dot, slot, "dv", false)
+end
+
+local hud = Drawing.new("Text")
+hud.Size = 16
+pcall(function() hud.FontSize = 16 end)
+hud.Center = true
+hud.Outline = true
+hud.Color = Color3.fromRGB(255, 255, 255)
+hud.Position = Vector2.new(400, 40)
+hud.Visible = false
+
+local hudText = ""
+local hudVisible = false
+local hudX = -1
+
+local coordInfo = { hud = Drawing.new("Text"), endAt = 0, shown = false }
+coordInfo.hud.Size = 18
+pcall(function() coordInfo.hud.FontSize = 18 end)
+coordInfo.hud.Center = true
+coordInfo.hud.Outline = true
+coordInfo.hud.Color = Color3.fromRGB(120, 255, 160)
+coordInfo.hud.Position = Vector2.new(400, 70)
+coordInfo.hud.Visible = false
+
+local function getViewport(cam)
+    return cam.ViewportSize
+end
+
+local function updateHud()
+    local show = farmOn()
+    if show then
+        local text
+        if cfg[ID_CFARM] == true then
+            text = "Candy: " .. farmState.status .. "  |  Delivered: " .. candy.delivered
+        elseif cfg[ID_GFARM] == true then
+            text = "Giveaway: " .. farmState.status .. "  |  Given: " .. give.given
+        else
+            text = "Autofarm: " .. farmState.status .. "  |  Grabbed: " .. farmState.grabbed
+        end
+        if text ~= hudText then
+            hudText = text
+            hud.Text = text
+        end
+        local cam = Workspace.CurrentCamera
+        if cam then
+            local okSize, size = pcall(getViewport, cam)
+            if okSize and size then
+                local x = size.X / 2
+                if x ~= hudX then
+                    hudX = x
+                    hud.Position = Vector2.new(x, 40)
+                end
+            end
+        end
+    end
+    if hudVisible ~= show then
+        hudVisible = show
+        hud.Visible = show
+    end
+
+    local showCoords = tick() < coordInfo.endAt
+    if showCoords ~= coordInfo.shown then
+        coordInfo.shown = showCoords
+        coordInfo.hud.Visible = showCoords
+    end
+end
+
+local fName, fTier, fChance, fDist, fDot = true, true, true, true, true
+local fRange = 200000
+local styleKey = 0
+local drawCount = 0
+local lastDrawCount = 0
+
+local function getCamPos(cam)
+    return cam.Position
+end
+
+local function drawNode(node, camPos)
+    local core = node.core
+    if core.Parent == nil then return end
+
+    local pos = core.Position
+    local dist = 0
+    if camPos then dist = (pos - camPos).Magnitude end
+    if dist > fRange then return end
+
+    local coords, onScreen = WorldToScreen(pos + K.LABEL_OFFSET)
+    if not onScreen then return end
+    if drawCount >= K.MAX_NODES then return end
+
+    drawCount = drawCount + 1
+    local slot = labelCache[drawCount]
+    local color = tierColors[node.tier]
+    local distKey = fDist and math.floor(dist) or -1
+
+    if slot.node ~= node or slot.best ~= node.best or slot.dist ~= distKey or slot.ver ~= styleKey then
+        slot.node = node
+        slot.best = node.best
+        slot.dist = distKey
+        slot.ver = styleKey
+
+        local title = node.identity
+        if node.best then title = "[BEST] " .. title end
+        slot.name.Text = title
+
+        local parts = {}
+        if fTier then parts[#parts + 1] = string.upper(node.tier) end
+        if fChance then parts[#parts + 1] = encodeSuffix(node.chance) end
+        if fDist then parts[#parts + 1] = tostring(distKey) .. "m" end
+        slot.info.Text = table.concat(parts, "  |  ")
+        slot.hasInfo = #parts > 0
+
+        slot.dot.Radius = node.best and 5 or 3
+    end
+
+    if slot.color ~= color then
+        slot.color = color
+        slot.name.Color = color
+        slot.dot.Color = color
+    end
+
+    local x, y = coords.X, coords.Y
+    if slot.x ~= x or slot.y ~= y then
+        slot.x = x
+        slot.y = y
+        slot.name.Position = Vector2.new(x, y - 32)
+        slot.info.Position = Vector2.new(x, y - 16)
+        slot.dot.Position = coords
+    end
+
+    setVis(slot.name, slot, "nv", fName)
+    setVis(slot.info, slot, "iv", slot.hasInfo == true)
+    setVis(slot.dot, slot, "dv", fDot)
+end
+
+--------------------------------------------------------------------
+-- Scanning
+--------------------------------------------------------------------
+
+local activeNodes = {}
+local stats = { found = 0, drawn = 0, unread = 0 }
+local scanTick = 0
+
+local function scanEggs()
+    local incoming = {}
+    local best = nil
+    local found = 0
+    local unread = 0
+
+    local env = Workspace:FindFirstChild("RenderedEggs")
+    if env then
+        for _, obj in ipairs(env:GetChildren()) do
+            if obj.ClassName == "Model" then
+                found = found + 1
+                local parsed = getEgg(obj)
+                if parsed then
+                    parsed.best = false
+                    if not best or parsed.chance > best.chance then best = parsed end
+                    if #incoming < K.MAX_SCAN then
+                        incoming[#incoming + 1] = parsed
+                    end
+                else
+                    unread = unread + 1
+                end
+            end
+        end
+    end
+
+    if best then best.best = true end
+
+    activeNodes = incoming
+    stats.found = found
+    stats.unread = unread
+
+    scanTick = scanTick + 1
+    if scanTick % 20 == 0 then cleanEggCache() end
+end
+
+--------------------------------------------------------------------
+-- Menu
+--------------------------------------------------------------------
+
+local awaiting = nil
+local topTargetKey = 0
+local baseKey = 0
+
+do
+local function askKey(kind, message)
+    return function()
+        awaiting = kind
+        notify(message, TAB_NAME, 3)
+    end
+end
+
+local btnBaseKey = askKey("base", "Press any key to map Go to Base")
+local btnJumpKey = askKey("jump", "Press any key to map Jump to Best")
+local btnPromptKey = askKey("prompt", "Press the key the egg prompt uses")
+
+local function btnGoDrop()
+    moveTo(candyDrop, K.CANDY_LIFT, 2)
+end
+
+local function btnMarkBase()
+    if markBaseHere() then
+        notify("Base marked at your position", TAB_NAME, 3)
+    else
+        notify("No character found", TAB_NAME, 3)
+    end
+end
+
+local function btnPrintCoords()
+    local ok, pos = pcall(function() return getRoot().Position end)
+    if not ok or not pos then
+        notify("No character found", TAB_NAME, 3)
+        return
+    end
+
+    local text = string.format("%.2f, %.2f, %.2f", pos.X, pos.Y, pos.Z)
+    pcall(print, "[Ride a Pet] Coordinates: " .. text)
+    pcall(warn, "[Ride a Pet] Coordinates: " .. text)
+    pcall(setclipboard, text)
+    notify("Coordinates copied: " .. text, TAB_NAME, 6)
+
+    coordInfo.hud.Text = "Coordinates: " .. text .. "  (copied)"
+    local okSize, size = pcall(function() return Workspace.CurrentCamera.ViewportSize end)
+    if okSize and size then
+        coordInfo.hud.Position = Vector2.new(size.X / 2, 70)
+    end
+    coordInfo.endAt = tick() + 20
+end
+
+local function tierButton(ids, rule)
+    return function()
+        for _, tier in ipairs(tierList) do
+            setUI(ids[tier], rule(tier) == true)
+        end
+    end
+end
+
+local btnShowAll = tierButton(TIER_ID, function() return true end)
+local btnShowNone = tierButton(TIER_ID, function() return false end)
+local btnShowLegendary = tierButton(TIER_ID, function(t) return tierRank[t] >= 4 end)
+local btnShowMythic = tierButton(TIER_ID, function(t) return tierRank[t] >= 5 end)
+local btnFarmDivine = tierButton(FARM_ID, function(t) return tierRank[t] >= 6 end)
+local btnFarmAll = tierButton(FARM_ID, function() return true end)
+local btnFarmNone = tierButton(FARM_ID, function() return false end)
+
+local function tog(sec, id, label)
+    widgets[id] = sec:Toggle(id, label, REG[id].default, cbFor(id))
+end
+
+local function sliderInt(sec, id, label, lo, hi)
+    widgets[id] = sec:SliderInt(id, label, lo, hi, REG[id].default, cbFor(id))
+end
+
+local function sliderFloat(sec, id, label, lo, hi, fmt)
+    widgets[id] = sec:SliderFloat(id, label, lo, hi, REG[id].default, fmt, cbFor(id))
+end
+
+local colorCbs = {}
+local function colorCb(tier)
+    local f = colorCbs[tier]
+    if not f then
+        f = function(color) pcall(applyColor, tier, color) end
+        colorCbs[tier] = f
+    end
+    return f
+end
+
+local function drawBasePage(sec)
+    sec:Text("Teleport")
+    widgets[ID_TP] = sec:Combo(ID_TP, "Teleport Method", TP_NAMES, REG[ID_TP].default, cbFor(ID_TP))
+    sec:Text("Auto: Pivot, then CFrame, then Hold on retries")
+    sec:Spacing()
+
+    sec:Text(baseCF and "Base: saved" or "Base: not saved")
+    sec:Button("Go to Base", goToBase)
+    sec:Button("Assign Base Key", btnBaseKey)
+    sec:Button("Mark Base Here", btnMarkBase)
+    sec:Text("Note for base you should stand on your base and mark")
+    sec:Spacing()
+
+    sec:Text("Jump")
+    sec:Button("Jump to Best Target", jumpToTopTier)
+    sec:Button("Assign Jump Key", btnJumpKey)
+    sec:Spacing()
+
+    sec:Text("Tools")
+    sec:Button("Print My Coordinates", btnPrintCoords)
+end
+
+local function drawEspPage(sec)
+    tog(sec, ID_MASTER, "Egg ESP")
+    tog(sec, ID_BEST, "Best Egg Only")
+
+    sec:Spacing()
+    sec:Text("Tiers to show")
+    for i = #tierList, 1, -1 do
+        local tier = tierList[i]
+        local base = defaultColors[tier]
+        tog(sec, TIER_ID[tier], tier)
+        sec:ColorPicker(COL_ID[tier], base[1], base[2], base[3], 1, colorCb(tier))
+    end
+    sec:Button("All Tiers On", btnShowAll)
+    sec:Button("All Tiers Off", btnShowNone)
+    sec:Button("Legendary and Up", btnShowLegendary)
+    sec:Button("Mythic and Up", btnShowMythic)
+
+    sec:Spacing()
+    sec:Text("Display")
+    tog(sec, ID_NAME, "Show Name")
+    tog(sec, ID_TIER, "Show Tier")
+    tog(sec, ID_CHANCE, "Show Chance")
+    tog(sec, ID_DIST, "Show Distance")
+    tog(sec, ID_DOT, "Show Marker")
+    widgets[ID_FONT] = sec:Combo(ID_FONT, "Font", fontNames, REG[ID_FONT].default, cbFor(ID_FONT))
+    sliderInt(sec, ID_SIZE, "Text Size", 10, 24)
+    sliderInt(sec, ID_RANGE, "Maximum Range", 100, 200000)
+
+    sec:Spacing()
+    sec:Text("Eggs: " .. stats.found .. " | Drawn: " .. stats.drawn .. " | Unread: " .. stats.unread)
+end
+
+local btnGiveDivine = tierButton(GFARM_ID, function(t) return tierRank[t] >= 6 end)
+local btnGiveAll = tierButton(GFARM_ID, function() return true end)
+local btnGiveNone = tierButton(GFARM_ID, function() return false end)
+
+local function drawGiveawayPage(sec)
+    sec:Text("Status: " .. farmState.status)
+    sec:Text("Given: " .. give.given)
+    tog(sec, ID_GFARM, "Giveaway Autofarm")
+    sec:Text("Drops each egg at a point. Best first, then the next best")
+    sec:Text("Turning this on turns the normal Autofarm off")
+    tog(sec, ID_GDIP, "Dip Before Giving")
+    sec:Text("Dips at VolcanoTop first, then drops at the point. Uses the Auto Dip Tries slider")
+
+    sec:Spacing()
+    sec:Text("Drop points")
+    for i = 1, 4 do
+        local v = give.points[i]
+        if v then
+            sec:Text(string.format("Point %d: %.1f, %.1f, %.1f", i, v.X, v.Y, v.Z))
+        end
+    end
+
+    sec:Spacing()
+    sec:Text("Rarities to give away, highest first")
+    for i = #tierList, 1, -1 do
+        local tier = tierList[i]
+        tog(sec, GFARM_ID[tier], tier)
+    end
+    sec:Button("Give Divine and Up", btnGiveDivine)
+    sec:Button("Give All", btnGiveAll)
+    sec:Button("Give None", btnGiveNone)
+    sec:Text("Hold, step and focus settings are on the Farm page")
+end
+
+local function drawFarmPage(sec)
+    sec:Text("Status: " .. farmState.status)
+    sec:Text("Grabbed: " .. farmState.grabbed)
+    tog(sec, ID_FARM, "Autofarm")
+    sec:Text("Stand on your base then click auto farm")
+    tog(sec, ID_DIP, "Auto Dip (VolcanoTop)")
+    sec:Text("Auto Dip: top of the volcano after each egg, then base")
+    sliderInt(sec, ID_DIPTRIES, "Auto Dip Tries", 1, 10)
+
+    sec:Spacing()
+    sec:Text("Rarities to farm, highest first")
+    for i = #tierList, 1, -1 do
+        local tier = tierList[i]
+        tog(sec, FARM_ID[tier], tier)
+    end
+    sec:Button("Farm Divine and Up", btnFarmDivine)
+    sec:Button("Farm All", btnFarmAll)
+    sec:Button("Farm None", btnFarmNone)
+
+    sec:Spacing()
+    sec:Text("Timing")
+    sliderFloat(sec, ID_HOLD, "Prompt Hold Time", 0.1, 3.0, "%.1f")
+    sliderFloat(sec, ID_STEP, "Step Delay", 0.1, 1.0, "%.2f")
+    sliderFloat(sec, ID_RETURN, "Return Wait", 0.0, 15.0, "%.1f")
+    sec:Spacing()
+    sec:Text("Trip back to base")
+    sliderInt(sec, ID_TWEEN_SPEED, "Tween Speed", 50, 600)
+    tog(sec, ID_FOCUS, "Pause if Roblox unfocused")
+    sec:Button("Assign Prompt Key", btnPromptKey)
+end
+
+local function drawCandyPage(sec)
+    sec:Text("Status: " .. farmState.status)
+    sec:Text("Delivered: " .. candy.delivered)
+    tog(sec, ID_CFARM, "Candy Farm")
+    sec:Text("Highest Candy number first, one candy at a time")
+    sec:Text("Turning this on turns the other farms off")
+
+    sec:Spacing()
+    sec:Text("Candy types")
+    for n = 4, 1, -1 do
+        tog(sec, CANDY_ID[n], string.format("Candy_%02d", n))
+    end
+
+    sec:Spacing()
+    sec:Text("Fixed delay AFTER the candy is picked up:")
+    sec:Text("  Candy_01 = 0s   Candy_02 = 1s   Candy_03 = 3s   Candy_04 = 5s")
+    sliderFloat(sec, ID_CDROPWAIT, "Drop Wait", 0.0, 3.0, "%.2f")
+    sec:Button("Go to Drop Point", btnGoDrop)
+    sec:Text("The prompt key and teleport method are set on the Farm and Base pages")
+end
+
+pcall(function() UI.RemoveTab(TAB_NAME) end)
+
+UI.AddTab(TAB_NAME, function(tab)
+    local sec = tab:Section("Ride a Pet", "Left", PAGES, 500)
+    local page = sec.page
+    if page == 0 then
+        drawBasePage(sec)
+    elseif page == 1 then
+        drawEspPage(sec)
+    elseif page == 2 then
+        drawFarmPage(sec)
+    elseif page == 3 then
+        drawGiveawayPage(sec)
+    elseif page == 4 then
+        drawCandyPage(sec)
+    end
+end)
+end
+
+--------------------------------------------------------------------
+-- Input
+--------------------------------------------------------------------
+
+local inputBlock = UIS.InputBegan:Connect(function(input)
+    local keyCode = input.KeyCode
+    if type(keyCode) ~= "number" then return end
+
+    local isTyping = false
+    pcall(function()
+        if UIS:GetFocusedTextBox() then isTyping = true end
+    end)
+    if isTyping then return end
+
+    if awaiting then
+        if keyCode ~= 0 then
+            if awaiting == "jump" then
+                topTargetKey = keyCode
+            elseif awaiting == "base" then
+                baseKey = keyCode
+            elseif awaiting == "prompt" then
+                promptKey = keyCode
+            end
+            notify(awaiting .. " key mapped to: " .. tostring(keyCode), TAB_NAME, 3)
+            awaiting = nil
+        end
+        return
+    end
+
+    if topTargetKey ~= 0 and keyCode == topTargetKey then jumpToTopTier() end
+    if baseKey ~= 0 and keyCode == baseKey then goToBase() end
+end)
+
+--------------------------------------------------------------------
+-- Loops
+--------------------------------------------------------------------
+
+task.spawn(function()
+    local n = 0
+    while alive do
+        pcall(pollUI)
+        n = n + 1
+        if n % 4 == 0 then
+            for i = 1, #tierList do
+                pcall(readColor, tierList[i])
+            end
+        end
+        task.wait(K.POLL_RATE)
+    end
+end)
+
+task.spawn(function()
+    while alive do
+        pcall(scanEggs)
+        task.wait(K.SCAN_RATE)
+    end
+end)
+
+local lastErrorNotify = 0
+
+task.spawn(function()
+    local wasOn = false
+    while alive do
+        if farmOn() then
+            local runCycle = true
+            if not wasOn then
+                wasOn = true
+                pcall(setrobloxinput, true)
+                pcall(keyrelease, promptKey)
+                if cfg[ID_CFARM] == true then
+                    farmState.status = "Starting"
+                elseif markBaseHere() then
+                    notify("Base marked at your position", TAB_NAME, 3)
+                    farmState.status = "Starting"
+                else
+                    notify("Could not mark base. No character found", TAB_NAME, 4)
+                    wasOn = false
+                    runCycle = false
+                    setFarm(false)
+                end
+            end
+            if runCycle then
+                cycleGen = farmGen
+                local ok, err = pcall(farmCycle)
+                if not ok then
+                    pcall(keyrelease, promptKey)
+                    farmState.status = "Error: " .. tostring(err)
+                    if tick() - lastErrorNotify > 5 then
+                        lastErrorNotify = tick()
+                        notify("Autofarm error: " .. tostring(err), TAB_NAME, 4)
+                    end
+                    task.wait(0.5)
+                end
+            end
+        else
+            if wasOn then
+                wasOn = false
+                pcall(keyrelease, promptKey)
+            end
+            farmState.status = "Off"
+            task.wait(0.15)
+        end
+    end
+end)
+
+task.spawn(function()
+    local lastStatus = ""
+    local lastChange = tick()
+    while alive do
+        task.wait(1)
+        local status = farmState.status
+        if not farmOn() or status ~= lastStatus then
+            lastStatus = status
+            lastChange = tick()
+        elseif tick() - lastChange > K.FARM_WATCHDOG_TIME then
+            local busy = string.find(status, "^Grabbing") or string.find(status, "^Volcano") or string.find(status, "^Returning") or string.find(status, "^Candy")
+            if busy then
+                farmGen = farmGen + 1
+                pcall(keyrelease, promptKey)
+                farmState.status = "Recovered from a stuck step"
+                lastStatus = farmState.status
+                notifyOnce("watchdog", "Autofarm was stuck. Restarted the cycle")
+            end
+            lastChange = tick()
+        end
+    end
+end)
+
+local tierOn = {}
+
+local renderTick = RunService.RenderStepped:Connect(function()
+    pcall(updateHud)
+
+    if cfg[ID_MASTER] ~= true then
+        for i = 1, lastDrawCount do
+            hideSlot(labelCache[i])
+        end
+        lastDrawCount = 0
+        stats.drawn = 0
+        return
+    end
+
+    local fontIndex = math.floor(cfg[ID_FONT]) + 1
+    local size = math.floor(cfg[ID_SIZE])
+    if appliedFont ~= fontIndex or appliedSize ~= size then
+        applyStyle(fontIndex, size)
+    end
+
+    fName = cfg[ID_NAME] == true
+    fTier = cfg[ID_TIER] == true
+    fChance = cfg[ID_CHANCE] == true
+    fDist = cfg[ID_DIST] == true
+    fDot = cfg[ID_DOT] == true
+    fRange = cfg[ID_RANGE]
+    styleKey = (fName and 1 or 0) + (fTier and 2 or 0) + (fChance and 4 or 0) + (fDist and 8 or 0) + colorVersion * 16
+
+    for i = 1, #tierList do
+        local tier = tierList[i]
+        tierOn[tier] = cfg[TIER_ID[tier]] == true
+    end
+    local onlyBest = cfg[ID_BEST] == true
+
+    local camPos = nil
+    local cam = Workspace.CurrentCamera
+    if cam then
+        local okCam, p = pcall(getCamPos, cam)
+        if okCam then camPos = p end
+    end
+
+    local snapshot = activeNodes
+    drawCount = 0
+
+    for i = 1, #snapshot do
+        if drawCount >= K.MAX_NODES then break end
+        local node = snapshot[i]
+        if tierOn[node.tier] and (not onlyBest or node.best) then
+            pcall(drawNode, node, camPos)
+        end
+    end
+
+    stats.drawn = drawCount
+
+    for i = drawCount + 1, lastDrawCount do
+        hideSlot(labelCache[i])
+    end
+    lastDrawCount = drawCount
+end)
+
+_G.RidePetOverlay_Unload = function()
+    alive = false
+    pcall(keyrelease, promptKey)
+    if inputBlock then inputBlock:Disconnect() end
+    if renderTick then renderTick:Disconnect() end
+    for i = 1, K.MAX_NODES do
+        local slot = labelCache[i]
+        slot.name:Remove()
+        slot.info:Remove()
+        slot.dot:Remove()
+    end
+    pcall(function() hud:Remove() end)
+    pcall(function() coordInfo.hud:Remove() end)
+    table.clear(eggCache)
+    pcall(function() UI.RemoveTab(TAB_NAME) end)
+    _G.RidePetOverlay_Unload = nil
+end
+
+notify("Ride a Pet loaded. Stand on your base, then turn on Autofarm", TAB_NAME, 5)
