@@ -97,13 +97,12 @@ K.CANDY_TRIES = 3
 K.CANDY_ARRIVE_RADIUS = 20
 K.CANDY_DROP_RADIUS = 20
 K.CANDY_BLACKLIST_TIME = 10
+K.CANDY_MAX_DELAY = 3.0
+K.CANDY_ARRIVE_SETTLE = 0.3
+K.CANDY_GONE_RADIUS = 20
 
 K.LABEL_OFFSET = Vector3.new(0, 2.8, 0)
 K.INFO_COLOR = Color3.fromRGB(235, 235, 235)
-
--- Fixed delay AFTER the candy is picked up, keyed by candy number.
--- Candy_01 = 0s, Candy_02 = 1s, Candy_03 = 3s, Candy_04 = 5s.
-local CANDY_DELAY = { [1] = 0.0, [2] = 1.0, [3] = 3.0, [4] = 5.0 }
 
 local alive = true
 
@@ -179,7 +178,6 @@ local ID_GFARM = reg(P .. "giveaway_farm_on", false, "bool")
 local ID_GDIP = reg(P .. "giveaway_dip", false, "bool")
 local ID_TP = reg(P .. "tp_method", 0, "num")
 local ID_CFARM = reg(P .. "candy_farm_on", false, "bool")
-local ID_CDROPWAIT = reg(P .. "candy_drop_wait", 0.4, "num")
 local CANDY_ID = {}
 for n = 1, 4 do
     CANDY_ID[n] = reg(P .. "candy_type_" .. n, true, "bool")
@@ -1287,7 +1285,7 @@ end
 -- Candy farm
 --------------------------------------------------------------------
 
-local candy = { delivered = 0, blacklist = {} }
+local candy = { delivered = 0, blacklist = {}, minD = nil, maxD = nil }
 local candyDrop = Vector3.new(K.CANDY_DROP[1], K.CANDY_DROP[2], K.CANDY_DROP[3])
 local candyCycle
 do
@@ -1361,10 +1359,13 @@ local function pickCandy()
                 if part then okPos, pos = pcall(function() return part.Position end) end
                 if okPos and pos then
                     local d = rootPos and (pos - rootPos).Magnitude or 0
+                    local dropDist = (pos - candyDrop).Magnitude
+                    if not candy.minD or dropDist < candy.minD then candy.minD = dropDist end
+                    if not candy.maxD or dropDist > candy.maxD then candy.maxD = dropDist end
                     if item.num > bestNum or (item.num == bestNum and d < bestDist) then
                         bestNum = item.num
                         bestDist = d
-                        best = { inst = item.inst, part = part, num = item.num, addr = addr, prompt = candyPrompt(item.inst) }
+                        best = { inst = item.inst, part = part, num = item.num, addr = addr, prompt = candyPrompt(item.inst), dropDist = dropDist }
                     end
                 end
             end
@@ -1389,6 +1390,45 @@ end
 local function candyNear(pos, radius)
     local ok, d = pcall(function() return (getRoot().Position - pos).Magnitude end)
     return ok and d <= radius
+end
+
+-- Wait after the pickup grows with the distance from the candy to the drop
+-- point. The closest candy waits 0 seconds, the farthest waits up to
+-- K.CANDY_MAX_DELAY. The range is learned from the candies the farm has seen.
+local function candyDelayFor(dist)
+    local lo, hi = candy.minD, candy.maxD
+    if not dist or not lo or not hi or hi - lo < 1 then return 0 end
+    local frac = (dist - lo) / (hi - lo)
+    if frac < 0 then frac = 0 end
+    if frac > 1 then frac = 1 end
+    return frac * K.CANDY_MAX_DELAY
+end
+
+-- A candy that vanishes while we stand on it is ours. One that vanishes while
+-- we are far away was taken by someone else.
+local function candyOutcome(t)
+    local pos = t.lastPos
+    if pos and candyNear(pos, K.CANDY_GONE_RADIUS) then return true end
+    return "gone"
+end
+
+-- Teleports to the drop point and confirms we are standing there. The check
+-- repeats after a short settle so a pull back is caught. Never leaves for the
+-- next candy until the drop point is reached or every try is used.
+local function goToDrop()
+    for attempt = 1, 8 do
+        if not farmRunning() then return false end
+        local level = attempt
+        if level > 3 then level = 3 end
+        farmState.status = string.format("Candy: going to drop (try %d)", attempt)
+        moveTo(candyDrop, K.CANDY_LIFT, level)
+        task.wait(0.1)
+        if candyNear(candyDrop, K.CANDY_DROP_RADIUS) then
+            settle(K.CANDY_ARRIVE_SETTLE)
+            if candyNear(candyDrop, K.CANDY_DROP_RADIUS) then return true end
+        end
+    end
+    return false
 end
 
 -- Press E and hold long enough for the game's ProximityPrompt to register,
@@ -1441,6 +1481,7 @@ local function grabCandy(t, container)
         -- Missed it. Re-teleport onto the candy and try again.
         local okPos, candyPos = pcall(function() return t.part.Position end)
         if okPos and candyPos then
+            t.lastPos = candyPos
             moveTo(candyPos, K.CANDY_LIFT, 2)
             task.wait(0.1)
         end
@@ -1451,15 +1492,14 @@ local function grabCandy(t, container)
         return false
     end
 
-    -- NOW start the fixed post-pickup delay for this candy number.
-    local waitAfter = CANDY_DELAY[t.num] or 0
-    if waitAfter < 0 then waitAfter = 0 end
+    -- Wait after the pickup. Longer when the candy is far from the drop point.
+    local waitAfter = candyDelayFor(t.dropDist)
 
     local startWait = tick()
     while farmRunning() do
         local elapsed = tick() - startWait
         if elapsed >= waitAfter then break end
-        farmState.status = string.format("Candy_%02d: waiting %.1fs after pickup", t.num, waitAfter - elapsed)
+        farmState.status = string.format("Candy_%02d: waiting %.1fs (%d studs from drop)", t.num, waitAfter - elapsed, math.floor(t.dropDist or 0))
         local r = getRoot()
         if r then pcall(zeroVelocity, r) end
         task.wait(0.05)
@@ -1482,7 +1522,7 @@ function candyCycle()
         farmState.status = string.format("Candy_%02d: grabbing (try %d)", target.num, attempt)
 
         if candyGone(target, container) then
-            result = "gone"
+            result = candyOutcome(target)
             break
         end
 
@@ -1490,6 +1530,7 @@ function candyCycle()
         -- verification loop, so there is zero delay before the E press.
         local okPos, candyPos = pcall(function() return target.part.Position end)
         if okPos and candyPos then
+            target.lastPos = candyPos
             moveTo(candyPos, K.CANDY_LIFT, attempt > 1 and 2 or 1)
             task.wait(0.1)
         end
@@ -1506,16 +1547,16 @@ function candyCycle()
                 break
             end
         else
-            result = "gone"
+            result = candyOutcome(target)
             break
         end
     end
 
     if result == true then
         candy.delivered = candy.delivered + 1
-        farmState.status = "Candy: delivering"
-        hopTo(function() return candyDrop end, K.CANDY_LIFT, false, K.CANDY_DROP_RADIUS)
-        settle(cfg[ID_CDROPWAIT])
+        if not goToDrop() and farmRunning() then
+            notifyOnce("CandyDrop", "Could not reach the drop point. Continuing")
+        end
     elseif result ~= "gone" and target.addr then
         candy.blacklist[target.addr] = tick() + K.CANDY_BLACKLIST_TIME
         farmState.status = "Skipped a candy"
@@ -2125,9 +2166,8 @@ local function drawCandyPage(sec)
     end
 
     sec:Spacing()
-    sec:Text("Fixed delay AFTER the candy is picked up:")
-    sec:Text("  Candy_01 = 0s   Candy_02 = 1s   Candy_03 = 3s   Candy_04 = 5s")
-    sliderFloat(sec, ID_CDROPWAIT, "Drop Wait", 0.0, 3.0, "%.2f")
+    sec:Text("Wait after pickup grows with distance from the drop point")
+    sec:Text("Closest candy = no wait. Farthest candy = 3 seconds")
     sec:Button("Go to Drop Point", btnGoDrop)
     sec:Text("The prompt key and teleport method are set on the Farm and Base pages")
 end
