@@ -97,7 +97,7 @@ K.CANDY_TRIES = 3
 K.CANDY_ARRIVE_RADIUS = 20
 K.CANDY_DROP_RADIUS = 20
 K.CANDY_BLACKLIST_TIME = 10
-K.CANDY_MAX_DELAY = 3.0
+K.CANDY_DELAYS = { [1] = 0.6, [2] = 2.5, [3] = 3.0, [4] = 5.0 }
 K.CANDY_ARRIVE_SETTLE = 0.3
 K.CANDY_GONE_RADIUS = 20
 
@@ -1285,7 +1285,7 @@ end
 -- Candy farm
 --------------------------------------------------------------------
 
-local candy = { delivered = 0, blacklist = {}, minD = nil, maxD = nil }
+local candy = { delivered = 0, blacklist = {} }
 local candyDrop = Vector3.new(K.CANDY_DROP[1], K.CANDY_DROP[2], K.CANDY_DROP[3])
 local candyCycle
 do
@@ -1359,13 +1359,10 @@ local function pickCandy()
                 if part then okPos, pos = pcall(function() return part.Position end) end
                 if okPos and pos then
                     local d = rootPos and (pos - rootPos).Magnitude or 0
-                    local dropDist = (pos - candyDrop).Magnitude
-                    if not candy.minD or dropDist < candy.minD then candy.minD = dropDist end
-                    if not candy.maxD or dropDist > candy.maxD then candy.maxD = dropDist end
                     if item.num > bestNum or (item.num == bestNum and d < bestDist) then
                         bestNum = item.num
                         bestDist = d
-                        best = { inst = item.inst, part = part, num = item.num, addr = addr, prompt = candyPrompt(item.inst), dropDist = dropDist }
+                        best = { inst = item.inst, part = part, num = item.num, addr = addr, prompt = candyPrompt(item.inst) }
                     end
                 end
             end
@@ -1390,18 +1387,6 @@ end
 local function candyNear(pos, radius)
     local ok, d = pcall(function() return (getRoot().Position - pos).Magnitude end)
     return ok and d <= radius
-end
-
--- Wait after the pickup grows with the distance from the candy to the drop
--- point. The closest candy waits 0 seconds, the farthest waits up to
--- K.CANDY_MAX_DELAY. The range is learned from the candies the farm has seen.
-local function candyDelayFor(dist)
-    local lo, hi = candy.minD, candy.maxD
-    if not dist or not lo or not hi or hi - lo < 1 then return 0 end
-    local frac = (dist - lo) / (hi - lo)
-    if frac < 0 then frac = 0 end
-    if frac > 1 then frac = 1 end
-    return frac * K.CANDY_MAX_DELAY
 end
 
 -- A candy that vanishes while we stand on it is ours. One that vanishes while
@@ -1492,14 +1477,14 @@ local function grabCandy(t, container)
         return false
     end
 
-    -- Wait after the pickup. Longer when the candy is far from the drop point.
-    local waitAfter = candyDelayFor(t.dropDist)
+    -- Fixed wait after the pickup, set by the candy number.
+    local waitAfter = K.CANDY_DELAYS[t.num] or 0
 
     local startWait = tick()
     while farmRunning() do
         local elapsed = tick() - startWait
         if elapsed >= waitAfter then break end
-        farmState.status = string.format("Candy_%02d: waiting %.1fs (%d studs from drop)", t.num, waitAfter - elapsed, math.floor(t.dropDist or 0))
+        farmState.status = string.format("Candy_%02d: waiting %.1fs after pickup", t.num, waitAfter - elapsed)
         local r = getRoot()
         if r then pcall(zeroVelocity, r) end
         task.wait(0.05)
@@ -2166,8 +2151,8 @@ local function drawCandyPage(sec)
     end
 
     sec:Spacing()
-    sec:Text("Wait after pickup grows with distance from the drop point")
-    sec:Text("Closest candy = no wait. Farthest candy = 3 seconds")
+    sec:Text("Wait after pickup, then the drop point:")
+    sec:Text("  Candy_01 = 0.6s   Candy_02 = 2.5s   Candy_03 = 3s   Candy_04 = 5s")
     sec:Button("Go to Drop Point", btnGoDrop)
     sec:Text("The prompt key and teleport method are set on the Farm and Base pages")
 end
