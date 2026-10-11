@@ -182,6 +182,12 @@ local CANDY_ID = {}
 for n = 1, 4 do
     CANDY_ID[n] = reg(P .. "candy_type_" .. n, true, "bool")
 end
+local RIT_ID = {
+    master = reg(P .. "ritual_master", true, "bool"),
+    yin = reg(P .. "ritual_yin", true, "bool"),
+    yang = reg(P .. "ritual_yang", true, "bool"),
+    dist = reg(P .. "ritual_dist", true, "bool"),
+}
 
 local TIER_ID = {}
 local FARM_ID = {}
@@ -1288,6 +1294,8 @@ end
 local candy = { delivered = 0, blacklist = {} }
 local candyDrop = Vector3.new(K.CANDY_DROP[1], K.CANDY_DROP[2], K.CANDY_DROP[3])
 local candyCycle
+local ritual = { found = { yin = false, yang = false } }
+local ritualDraw
 do
 
 local function candyCollect(node, num, depth, out)
@@ -2157,6 +2165,16 @@ local function drawCandyPage(sec)
     sec:Text("The prompt key and teleport method are set on the Farm and Base pages")
 end
 
+local function drawRitualPage(sec)
+    sec:Text("Yin: " .. (ritual.found.yin and "found" or "not found"))
+    sec:Text("Yang: " .. (ritual.found.yang and "found" or "not found"))
+    tog(sec, RIT_ID.master, "Yin and Yang ESP")
+    tog(sec, RIT_ID.yin, "Show Yin")
+    tog(sec, RIT_ID.yang, "Show Yang")
+    tog(sec, RIT_ID.dist, "Show Distance")
+    sec:Text("Font and text size follow the ESP page")
+end
+
 pcall(function() UI.RemoveTab(TAB_NAME) end)
 
 UI.AddTab(TAB_NAME, function(tab)
@@ -2173,6 +2191,16 @@ UI.AddTab(TAB_NAME, function(tab)
     elseif page == 4 then
         drawCandyPage(sec)
     end
+
+    local rsec
+    local okR, resR = pcall(function() return tab:Section("Yin and Yang", "Right", nil, 230) end)
+    if okR and resR then
+        rsec = resR
+    else
+        local okR2, resR2 = pcall(function() return tab:Section("Yin and Yang", "Right", { "Yin and Yang" }, 230) end)
+        if okR2 then rsec = resR2 end
+    end
+    if rsec then drawRitualPage(rsec) end
 end)
 end
 
@@ -2304,10 +2332,217 @@ task.spawn(function()
     end
 end)
 
+--------------------------------------------------------------------
+-- Yin and Yang ESP
+--------------------------------------------------------------------
+
+do
+    local ENTRIES = {
+        { key = "yin", label = "Yin", path = { "HeadlessRitual", "Runtime", "Yin" }, color = Color3.fromRGB(150, 210, 255) },
+        { key = "yang", label = "Yang", path = { "HeadlessRitual", "Runtime", "Yang" }, color = Color3.fromRGB(255, 170, 60) },
+    }
+
+    local function followPath(path)
+        local node = Workspace
+        for _, name in ipairs(path) do
+            node = node:FindFirstChild(name)
+            if not node then return nil end
+        end
+        return node
+    end
+
+    local function pickPart(node)
+        if node:IsA("BasePart") then return node end
+        for _, nm in ipairs({ "HumanoidRootPart", "RootPart", "Root", "Torso", "Body", "Main" }) do
+            local c = node:FindFirstChild(nm)
+            if c and c:IsA("BasePart") then return c end
+        end
+        local okPrimary, primary = pcall(function() return node.PrimaryPart end)
+        if okPrimary and primary then return primary end
+        for _, d in ipairs(node:GetDescendants()) do
+            if d:IsA("BasePart") then return d end
+        end
+        return nil
+    end
+
+    for _, e in ipairs(ENTRIES) do
+        local text = Drawing.new("Text")
+        text.Size = 15
+        pcall(function() text.FontSize = 15 end)
+        text.Center = true
+        text.Outline = true
+        text.Color = e.color
+        text.Visible = false
+
+        local dot = Drawing.new("Circle")
+        dot.Radius = 4
+        dot.NumSides = 16
+        dot.Thickness = 1
+        pcall(function() dot.Filled = true end)
+        dot.Color = e.color
+        dot.Visible = false
+
+        e.text = text
+        e.dot = dot
+        e.nextResolve = 0
+        e.shown = false
+    end
+
+    local function hide(e)
+        if e.shown then
+            e.shown = false
+            e.text.Visible = false
+            e.dot.Visible = false
+        end
+    end
+
+    function ritualDraw()
+        local masterOn = cfg[RIT_ID.master] == true
+        local cam = Workspace.CurrentCamera
+        local now = tick()
+        local font = resolveFont(math.floor(cfg[ID_FONT]) + 1)
+        local size = math.floor(cfg[ID_SIZE])
+
+        for _, e in ipairs(ENTRIES) do
+            if now >= e.nextResolve then
+                e.nextResolve = now + 0.5
+                local okNode, node = pcall(followPath, e.path)
+                if not (okNode and node) then
+                    -- fallback: search for it by name (inside HeadlessRitual first, then whole workspace)
+                    node = nil
+                    local want = string.lower(e.label)
+                    local function search(root)
+                        local ok, list = pcall(function() return root:GetDescendants() end)
+                        if not ok or not list then return nil end
+                        for _, d in ipairs(list) do
+                            local okN, nm = pcall(function() return d.Name end)
+                            if okN and type(nm) == "string" and string.lower(nm) == want then
+                                local okC, cls = pcall(function() return d.ClassName end)
+                                if okC and cls ~= "Folder" then return d end
+                            end
+                        end
+                        return nil
+                    end
+                    local hr = Workspace:FindFirstChild("HeadlessRitual")
+                    local root = hr and hr:FindFirstChild("Runtime")
+                    if root then node = search(root) end
+                    local deepRan = false
+                    if false then
+                        e.nextDeep = now + 3
+                        deepRan = true
+                        node = search(Workspace)
+                    end
+                    okNode = node ~= nil
+                    if not node and not deepRan then okNode = nil; e.keep = true end
+                end
+                if not e.keep then e.part = nil end
+                e.keep = nil
+                if okNode and node then
+                    e.node = node
+                    local okPart, part = pcall(pickPart, node)
+                    if okPart then e.part = part end
+
+                end
+                if e.part and e.part.Parent == nil then e.part = nil end
+                if e.node and e.part then
+                    local function far(part)
+                        local okP, p = pcall(function() return part.Position end)
+                        return okP and p and p.Magnitude >= 100
+                    end
+                    if not far(e.part) then
+                        local better
+                        local okD, list = pcall(function() return e.node:GetDescendants() end)
+                        if okD and list then
+                            local bestVol = -1
+                            for _, d in ipairs(list) do
+                                local okB, isP = pcall(function() return d:IsA("BasePart") end)
+                                if okB and isP and far(d) then
+                                    local okS, sz = pcall(function() return d.Size end)
+                                    local vol = (okS and sz) and (sz.X * sz.Y * sz.Z) or 0
+                                    if vol > bestVol then bestVol = vol; better = d end
+                                end
+                            end
+                        end
+                        -- ignore placeholders parked at the origin (not spawned yet)
+                        if better then e.part = better else e.part = nil; e.node = nil; e.reported = nil end
+                    end
+                end
+                if e.part and not e.reported then
+                    e.reported = true
+                    local okPos, pp = pcall(function() return e.part.Position end)
+                    notifyOnce("rit_" .. e.key, e.label .. " tracking " .. tostring(e.part.Name) .. " at " .. (okPos and string.format("%d, %d, %d", pp.X, pp.Y, pp.Z) or "?"))
+                end
+                ritual.found[e.key] = e.part ~= nil
+            end
+
+            local drawn = false
+            if masterOn and cfg[RIT_ID[e.key]] == true and e.part and cam then
+                local okDraw, errDraw = pcall(function()
+                    local pos
+                    if e.part then
+                        local okP, p = pcall(function() return e.part.Position end)
+                        if okP then pos = p end
+                    end
+                    if not pos and e.node then
+                        local okP, p = pcall(function() return e.node:GetPivot().Position end)
+                        if okP then pos = p end
+                    end
+                    if not pos then
+                        notifyOnce("ritpos_" .. e.key, e.label .. ": could not read its position")
+                        return
+                    end
+                    local coords, onScreen = WorldToScreen(pos + K.LABEL_OFFSET)
+                    if not coords then return end
+                    if not onScreen then
+                        local d = math.floor((pos - cam.Position).Magnitude)
+                        -- off screen: pin label to top of screen with distance
+                        local vp = cam.ViewportSize
+                        e.text.Text = e.label .. " (off screen) " .. tostring(d) .. "m"
+                        e.text.Position = Vector2.new(vp.X / 2, 60 + (e.key == "yang" and 18 or 0))
+                        e.text.Visible = true
+                        e.dot.Visible = false
+                        e.shown = true
+                        drawn = true
+                        return
+                    end
+
+                    local label = e.label
+                    if cfg[RIT_ID.dist] == true then
+                        label = label .. " | " .. tostring(math.floor((pos - cam.Position).Magnitude)) .. "m"
+                    end
+
+                    e.text.Text = label
+                    pcall(function() e.text.Font = font end)
+                    pcall(function()
+                        e.text.Size = size
+                        e.text.FontSize = size
+                    end)
+                    e.text.Position = Vector2.new(coords.X, coords.Y - 16)
+                    e.dot.Position = coords
+                    e.text.Visible = true
+                    e.dot.Visible = true
+                    e.shown = true
+                    drawn = true
+                end)
+                if not okDraw then notifyOnce("ritdraw_" .. e.key, e.label .. " draw error: " .. tostring(errDraw)) end
+            end
+            if not drawn then hide(e) end
+        end
+    end
+
+    ritual.remove = function()
+        for _, e in ipairs(ENTRIES) do
+            pcall(function() e.text:Remove() end)
+            pcall(function() e.dot:Remove() end)
+        end
+    end
+end
+
 local tierOn = {}
 
 local renderTick = RunService.RenderStepped:Connect(function()
     pcall(updateHud)
+    pcall(ritualDraw)
 
     if cfg[ID_MASTER] ~= true then
         for i = 1, lastDrawCount do
@@ -2377,6 +2612,7 @@ _G.RidePetOverlay_Unload = function()
     end
     pcall(function() hud:Remove() end)
     pcall(function() coordInfo.hud:Remove() end)
+    if ritual.remove then pcall(ritual.remove) end
     table.clear(eggCache)
     pcall(function() UI.RemoveTab(TAB_NAME) end)
     _G.RidePetOverlay_Unload = nil
